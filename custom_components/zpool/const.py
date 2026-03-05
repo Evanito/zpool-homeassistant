@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 
-DOMAIN = "zpool_monitor"
+DOMAIN = "zpool"
 
 # Wallet address configuration key used by the config flow
 CONF_WALLET_ADDRESS = "wallet_address"
