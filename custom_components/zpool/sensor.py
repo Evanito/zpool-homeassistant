@@ -4,7 +4,7 @@ import logging
 import re
 from typing import Any
 
-from homeassistant.components.sensor import SensorEntity, SensorStateClass
+from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorStateClass
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
@@ -15,7 +15,6 @@ from .coordinator import ZpoolDataUpdateCoordinator
 from .const import CONF_WALLET_ADDRESS, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
-
 
 def _wallet_device_info(wallet_address: str) -> DeviceInfo:
     """Return DeviceInfo for the wallet-level device."""
@@ -95,7 +94,7 @@ async def async_setup_entry(
         ZpoolWalletSensor(coordinator, wallet_address, "paid24h", "Paid (24h)", currency)
     )
     entities.append(
-        ZpoolWalletSensor(coordinator, wallet_address, "paidtotal", "Paid Total", currency)
+        ZpoolWalletSensor(coordinator, wallet_address, "paidtotal", "Earned Total", currency)
     )
 
     # ── Per-miner hashrate + firmware sensors ───────────────────────────
@@ -178,9 +177,11 @@ class ZpoolWalletSensor(CoordinatorEntity[ZpoolDataUpdateCoordinator], SensorEnt
 class ZpoolMinerHashrateSensor(CoordinatorEntity[ZpoolDataUpdateCoordinator], SensorEntity):
     """Hashrate for an individual miner, identified by its name."""
 
+    _attr_device_class = SensorDeviceClass.FREQUENCY
     _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_native_unit_of_measurement = "H/s"
+    _attr_native_unit_of_measurement = "Hz"
     _attr_has_entity_name = True
+    _attr_suggested_display_precision = 2
 
     def __init__(
         self,
@@ -286,9 +287,11 @@ class ZpoolMinerFirmwareSensor(CoordinatorEntity[ZpoolDataUpdateCoordinator], Se
 class ZpoolAlgorithmHashrateSensor(CoordinatorEntity[ZpoolDataUpdateCoordinator], SensorEntity):
     """Total hashrate for a given algorithm across all miners."""
 
+    _attr_device_class = SensorDeviceClass.FREQUENCY
     _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_native_unit_of_measurement = "H/s"
+    _attr_native_unit_of_measurement = "Hz"
     _attr_has_entity_name = True
+    _attr_suggested_display_precision = 2
 
     def __init__(
         self,

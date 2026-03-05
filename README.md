@@ -23,7 +23,7 @@ Supported Features:
 | **Balance** | Current wallet balance |
 | **Unpaid** | Unpaid (pending) balance |
 | **Paid (24h)** | Amount paid out in the last 24 hours |
-| **Paid Total** | Total amount paid out to date |
+| **Earned Total** | Total amount earned to date (paid + confirmed + unconfirmed) |
 
 ### Per-Miner Sensors
 For each miner detected on your wallet:
