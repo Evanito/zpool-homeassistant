@@ -1,0 +1,29 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  release_zip_file:
+    name: Publish HACS zip file asset
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v2
+
+      - name: ZIP zpool Dir
+        if: ${{ github.event_name == 'release' }}
+        run: |
+          cd ${{ github.workspace }}/custom_components/zpool
+          zip zpool.zip -r ./
+
+      - name: Upload zip to release
+        uses: svenstaro/upload-release-action@v1-release
+        if: ${{ github.event_name == 'release' }}
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: ${{ github.workspace }}/custom_components/zpool/zpool.zip
+          asset_name: zpool.zip
+          tag: ${{ github.ref }}
+          overwrite: true

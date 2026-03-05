@@ -1,0 +1,21 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Zpool Monitor",
+        "description": "Enter your wallet address to monitor your Zpool mining stats.",
+        "data": {
+          "wallet_address": "Wallet Address"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to Zpool API.",
+      "invalid_auth": "Invalid wallet address or API error.",
+      "unknown": "An unexpected error occurred."
+    },
+    "abort": {
+      "already_configured": "This wallet address is already configured."
+    }
+  }
+}
