@@ -8,7 +8,9 @@
 _Home Assistant Integration for monitoring your [Zpool](https://www.zpool.ca) mining pool wallet._
 
 Supported Features:
- * Monitor wallet balance, unpaid balance, 24h payouts, and total payouts
+ * Monitor wallet balance, unpaid balance, and total payouts
+ * Last payout tracking (amount and timestamp)
+ * Next payout prediction based on balance accumulation rate since the last payout
  * Per-miner hashrate tracking with automatic miner discovery
  * Per-miner firmware version detection (parsed from miner version strings)
  * Per-algorithm total hashrate sensors
@@ -20,10 +22,12 @@ Supported Features:
 ### Wallet-Level Sensors
 | Sensor | Description |
 |--------|-------------|
-| **Balance** | Current wallet balance |
-| **Unpaid** | Unpaid (pending) balance |
-| **Paid (24h)** | Amount paid out in the last 24 hours |
+| **Balance** | Current confirmed wallet balance |
+| **Pending** | Pending (confirmed+unconfirmed) balance |
 | **Earned Total** | Total amount earned to date (paid + confirmed + unconfirmed) |
+| **Last Payout Amount** | Amount of the most recent payout|
+| **Last Payout** | Timestamp of the most recent payout |
+| **Next Payout Prediction** | Estimated time the next payout will occur, based on the rate of balance accumulation since the last payout |
 
 ### Per-Miner Sensors
 For each miner detected on your wallet:

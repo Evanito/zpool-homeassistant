@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorStateClass
@@ -9,7 +10,9 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.util import dt as dt_util
 
 from .coordinator import ZpoolDataUpdateCoordinator
 from .const import CONF_WALLET_ADDRESS, DOMAIN
@@ -21,7 +24,7 @@ def _wallet_device_info(wallet_address: str) -> DeviceInfo:
     short_addr = f"{wallet_address[:6]}…{wallet_address[-4:]}" if len(wallet_address) > 12 else wallet_address
     return DeviceInfo(
         identifiers={(DOMAIN, wallet_address)},
-        name=f"Zpool Wallet ({short_addr})",
+        name=f"Wallet ({short_addr})",
         manufacturer="Zpool",
         model="Wallet",
         entry_type=None,
@@ -62,7 +65,7 @@ def _miner_device_info(wallet_address: str, safe_name: str, miner_name: str) -> 
     """Return DeviceInfo for a per-miner device."""
     return DeviceInfo(
         identifiers={(DOMAIN, f"{wallet_address}_miner_{safe_name}")},
-        name=f"Zpool Miner {miner_name}",
+        name=f"Miner {miner_name}",
         manufacturer="Zpool",
         model="Miner",
         via_device=(DOMAIN, wallet_address),
@@ -88,13 +91,21 @@ async def async_setup_entry(
         ZpoolWalletSensor(coordinator, wallet_address, "balance", "Balance", currency)
     )
     entities.append(
-        ZpoolWalletSensor(coordinator, wallet_address, "unpaid", "Unpaid", currency)
-    )
-    entities.append(
-        ZpoolWalletSensor(coordinator, wallet_address, "paid24h", "Paid (24h)", currency)
+        ZpoolWalletSensor(coordinator, wallet_address, "unpaid", "Pending", currency)
     )
     entities.append(
         ZpoolWalletSensor(coordinator, wallet_address, "paidtotal", "Earned Total", currency)
+    )
+
+    # ── Payout tracking sensors ─────────────────────────────────────────
+    entities.append(
+        ZpoolLastPayoutAmountSensor(coordinator, wallet_address, currency)
+    )
+    entities.append(
+        ZpoolLastPayoutTimestampSensor(coordinator, wallet_address)
+    )
+    entities.append(
+        ZpoolNextPayoutPredictionSensor(coordinator, wallet_address)
     )
 
     # ── Per-miner hashrate + firmware sensors ───────────────────────────
@@ -133,7 +144,7 @@ async def async_setup_entry(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Wallet-level sensor (balance / unpaid / paid24h / paidtotal)
+# Wallet-level sensor (balance / unpaid / paidtotal)
 # ─────────────────────────────────────────────────────────────────────────────
 class ZpoolWalletSensor(CoordinatorEntity[ZpoolDataUpdateCoordinator], SensorEntity):
     """Represents a wallet-level numeric value from the Zpool API."""
@@ -152,7 +163,7 @@ class ZpoolWalletSensor(CoordinatorEntity[ZpoolDataUpdateCoordinator], SensorEnt
         super().__init__(coordinator)
         self._key = key
         self._wallet_address = wallet_address
-        self._attr_name = f"Zpool {name}"
+        self._attr_name = f"{name}"
         self._attr_unique_id = f"zpool_{wallet_address}_{key}"
         self._attr_native_unit_of_measurement = currency
 
@@ -304,7 +315,7 @@ class ZpoolAlgorithmHashrateSensor(CoordinatorEntity[ZpoolDataUpdateCoordinator]
         self._index = index
         self._algo_name = algo_name
         self._wallet_address = wallet_address
-        self._attr_name = f"Zpool {algo_name} Hashrate"
+        self._attr_name = f"{algo_name} Hashrate"
         self._attr_unique_id = f"zpool_{wallet_address}_algo_{algo_name}_hashrate"
 
     @property
@@ -325,3 +336,262 @@ class ZpoolAlgorithmHashrateSensor(CoordinatorEntity[ZpoolDataUpdateCoordinator]
                 if val is not None:
                     return float(val)
         return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────────────────────────────────────
+def _get_latest_payout(data: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the most recent payout entry sorted by timestamp, or None."""
+    payouts = data.get("payouts")
+    if not payouts or not isinstance(payouts, list):
+        return None
+    # Sort descending by time to find the latest payout
+    sorted_payouts = sorted(payouts, key=lambda p: p.get("time", 0), reverse=True)
+    if sorted_payouts:
+        return sorted_payouts[0]
+    return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Last Payout Amount sensor
+# ─────────────────────────────────────────────────────────────────────────────
+class ZpoolLastPayoutAmountSensor(
+    CoordinatorEntity[ZpoolDataUpdateCoordinator], RestoreEntity, SensorEntity
+):
+    """Tracks the amount of the most recent payout.
+
+    Only updates when a new payout transaction is detected. Survives HA
+    restarts via RestoreEntity.
+    """
+
+    _attr_state_class = SensorStateClass.TOTAL
+    _attr_has_entity_name = True
+    _attr_icon = "mdi:cash-check"
+
+    def __init__(
+        self,
+        coordinator: ZpoolDataUpdateCoordinator,
+        wallet_address: str,
+        currency: str,
+    ) -> None:
+        super().__init__(coordinator)
+        self._wallet_address = wallet_address
+        self._attr_name = "Last Payout Amount"
+        self._attr_unique_id = f"zpool_{wallet_address}_last_payout_amount"
+        self._attr_native_unit_of_measurement = currency
+        self._last_tx: str | None = None
+        self._last_amount: float | None = None
+
+    async def async_added_to_hass(self) -> None:
+        """Restore previous state on startup."""
+        await super().async_added_to_hass()
+        if (last_state := await self.async_get_last_state()) is not None:
+            self._last_tx = last_state.attributes.get("tx_hash")
+            if last_state.state not in (None, "unknown", "unavailable"):
+                try:
+                    self._last_amount = float(last_state.state)
+                except (ValueError, TypeError):
+                    pass
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return _wallet_device_info(self._wallet_address)
+
+    @property
+    def native_value(self) -> float | None:
+        data = self.coordinator.data
+        if isinstance(data, dict):
+            payout = _get_latest_payout(data)
+            if payout is not None:
+                tx = payout.get("tx")
+                if tx and tx != self._last_tx:
+                    self._last_tx = tx
+                    try:
+                        self._last_amount = float(payout.get("amount", 0))
+                    except (ValueError, TypeError):
+                        pass
+        return self._last_amount
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return {"tx_hash": self._last_tx}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Last Payout Timestamp sensor
+# ─────────────────────────────────────────────────────────────────────────────
+class ZpoolLastPayoutTimestampSensor(
+    CoordinatorEntity[ZpoolDataUpdateCoordinator], RestoreEntity, SensorEntity
+):
+    """Tracks the timestamp of the most recent payout.
+
+    Only updates when a new payout transaction is detected. Survives HA
+    restarts via RestoreEntity.
+    """
+
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+    _attr_has_entity_name = True
+    _attr_icon = "mdi:clock-check-outline"
+
+    def __init__(
+        self,
+        coordinator: ZpoolDataUpdateCoordinator,
+        wallet_address: str,
+    ) -> None:
+        super().__init__(coordinator)
+        self._wallet_address = wallet_address
+        self._attr_name = "Last Payout"
+        self._attr_unique_id = f"zpool_{wallet_address}_last_payout_timestamp"
+        self._last_tx: str | None = None
+        self._last_time: datetime | None = None
+
+    async def async_added_to_hass(self) -> None:
+        """Restore previous state on startup."""
+        await super().async_added_to_hass()
+        if (last_state := await self.async_get_last_state()) is not None:
+            self._last_tx = last_state.attributes.get("tx_hash")
+            if last_state.state not in (None, "unknown", "unavailable"):
+                try:
+                    self._last_time = dt_util.parse_datetime(last_state.state)
+                except (ValueError, TypeError):
+                    pass
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return _wallet_device_info(self._wallet_address)
+
+    @property
+    def native_value(self) -> datetime | None:
+        data = self.coordinator.data
+        if isinstance(data, dict):
+            payout = _get_latest_payout(data)
+            if payout is not None:
+                tx = payout.get("tx")
+                if tx and tx != self._last_tx:
+                    self._last_tx = tx
+                    ts = payout.get("time")
+                    if ts is not None:
+                        self._last_time = datetime.fromtimestamp(
+                            int(ts), tz=timezone.utc
+                        )
+        return self._last_time
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return {"tx_hash": self._last_tx}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Next Payout Prediction sensor
+# ─────────────────────────────────────────────────────────────────────────────
+class ZpoolNextPayoutPredictionSensor(
+    CoordinatorEntity[ZpoolDataUpdateCoordinator], RestoreEntity, SensorEntity
+):
+    """Predicts when the next payout will occur.
+
+    Uses the earning rate derived from balance accumulation since the last
+    payout to estimate when the balance will reach the same amount as the
+    previous payout.
+
+    earning_rate = balance / (now - last_payout_time)
+    remaining    = last_payout_amount - balance
+    predicted    = now + remaining / earning_rate
+    """
+
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+    _attr_has_entity_name = True
+    _attr_icon = "mdi:crystal-ball"
+
+    def __init__(
+        self,
+        coordinator: ZpoolDataUpdateCoordinator,
+        wallet_address: str,
+    ) -> None:
+        super().__init__(coordinator)
+        self._wallet_address = wallet_address
+        self._attr_name = "Next Payout Prediction"
+        self._attr_unique_id = f"zpool_{wallet_address}_next_payout_prediction"
+        # Cached payout info (restored across restarts)
+        self._last_payout_tx: str | None = None
+        self._last_payout_amount: float | None = None
+        self._last_payout_time: datetime | None = None
+
+    async def async_added_to_hass(self) -> None:
+        """Restore previous payout context on startup."""
+        await super().async_added_to_hass()
+        if (last_state := await self.async_get_last_state()) is not None:
+            attrs = last_state.attributes
+            self._last_payout_tx = attrs.get("last_payout_tx")
+            try:
+                self._last_payout_amount = float(attrs.get("last_payout_amount", 0))
+            except (ValueError, TypeError):
+                self._last_payout_amount = None
+            ts_str = attrs.get("last_payout_time")
+            if ts_str:
+                self._last_payout_time = dt_util.parse_datetime(ts_str)
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return _wallet_device_info(self._wallet_address)
+
+    @property
+    def native_value(self) -> datetime | None:
+        data = self.coordinator.data
+        if not isinstance(data, dict):
+            return None
+
+        # Update cached payout info if a new payout is detected
+        payout = _get_latest_payout(data)
+        if payout is not None:
+            tx = payout.get("tx")
+            if tx and tx != self._last_payout_tx:
+                self._last_payout_tx = tx
+                try:
+                    self._last_payout_amount = float(payout.get("amount", 0))
+                except (ValueError, TypeError):
+                    self._last_payout_amount = None
+                ts = payout.get("time")
+                if ts is not None:
+                    self._last_payout_time = datetime.fromtimestamp(
+                        int(ts), tz=timezone.utc
+                    )
+
+        # Need both a previous payout amount and time to predict
+        if not self._last_payout_amount or not self._last_payout_time:
+            return None
+
+        balance = data.get("balance")
+        if balance is None:
+            return None
+        balance = float(balance)
+
+        now = dt_util.utcnow()
+        elapsed = (now - self._last_payout_time).total_seconds()
+        if elapsed <= 0:
+            return None
+
+        # Balance already meets or exceeds the target → payout imminent
+        if balance >= self._last_payout_amount:
+            return now
+
+        earning_rate = balance / elapsed  # coins per second
+        if earning_rate <= 0:
+            return None
+
+        remaining = self._last_payout_amount - balance
+        seconds_to_payout = remaining / earning_rate
+        predicted = now + timedelta(seconds=seconds_to_payout)
+        return predicted
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        attrs: dict[str, Any] = {
+            "last_payout_tx": self._last_payout_tx,
+            "last_payout_amount": self._last_payout_amount,
+        }
+        if self._last_payout_time:
+            attrs["last_payout_time"] = self._last_payout_time.isoformat()
+        else:
+            attrs["last_payout_time"] = None
+        return attrs
